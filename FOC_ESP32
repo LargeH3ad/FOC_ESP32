@@ -1,0 +1,136 @@
+// This code currently runs initial start-up sequence
+// and can spin given a hardcoded speed however
+// it currently fails to receive commands
+
+#include <SimpleFOC.h>
+
+// DRV8302 pins connections
+#define   INH_A 16
+#define   INH_B 17
+#define   INH_C 12
+//#define   INL_A 15
+//#define   INL_B 13
+//#define   INL_C 23
+
+#define   EN_GATE 27
+#define   M_PWM 26 
+#define   M_OC 3
+#define   OC_ADJ 25
+
+// Motor instance
+BLDCMotor motor = BLDCMotor(7); // Assuming 7 pole pairs (adjust as needed)
+
+// Driver instance
+BLDCDriver3PWM driver = BLDCDriver3PWM(INH_A, INH_B, INH_C, EN_GATE);
+
+// AS5600 magnetic sensor instance (I2C)
+MagneticSensorI2C sensor = MagneticSensorI2C(0x36, 12, 0x0E, 4);
+
+// Commander interface
+// Commander interface
+Commander command = Commander(Serial);
+void onMotor(char* cmd) { command.motor(&motor, cmd); }
+
+void setup() {
+  
+  // DRV8302 specific code
+  // M_OC - enable over-current protection
+  pinMode(M_OC, OUTPUT);
+  digitalWrite(M_OC, LOW);
+  // M_PWM - enable 3PWM mode
+  pinMode(M_PWM, OUTPUT);
+  digitalWrite(M_PWM, HIGH);
+  // OC_ADJ - set the maximum over-current limit possible
+  pinMode(OC_ADJ, OUTPUT);
+  digitalWrite(OC_ADJ, HIGH);
+
+  // Initialize the AS5600 sensor
+  sensor.init();
+  // Link the motor to the sensor
+  motor.linkSensor(&sensor);
+
+  // Configure driver
+  driver.voltage_power_supply = 24; // Your supply voltage
+  driver.init();
+  motor.linkDriver(&driver);
+
+//  driver.pwm_frequency = 25000;
+  
+//  // Choose FOC modulation
+//  motor.foc_modulation = FOCModulationType::SpaceVectorPWM;
+
+  motor.controller = MotionControlType::velocity;
+  motor.PID_velocity.P = 0.025;
+  motor.PID_velocity.I = 0.20;
+  motor.PID_velocity.D = 0;
+  
+  motor.PID_velocity.output_ramp = 1000;
+  motor.LPF_velocity.Tf = 0.01;
+//  
+  motor.voltage_limit = 20;
+//  motor.LPF_velocity.Tf =  0.01;
+
+  // Angle loop controller
+//  motor.P_angle.P = 20;
+  
+  // Angle loop velocity limit
+//  motor.velocity_limit = 50;
+
+  // Use monitoring with serial for motor init
+  Serial.begin(115200);
+  motor.useMonitoring(Serial);
+  
+  motor.current_limit = 5; // Amps - default 0.2Amps
+
+  // Initialize motor
+  motor.init();
+  // Align sensor and start FOC
+  motor.initFOC();
+
+  // Set the initial target value
+  motor.target = 10;
+
+  // Define the motor ID for commander
+  command.add('M', onMotor, "motor");
+
+
+//  digitalWrite(EN_GATE, HIGH);
+
+//  digitalWrite(OC_ADJ, HIGH);
+
+//  driver.setPwm(10,10,10);
+  
+  _delay(1000);
+}
+
+//float target_velocity = 10 ; // 2Rad/s ~ 20rpm
+
+void loop() {
+  // Iterative setting FOC phase voltage
+  motor.loopFOC();
+//  Serial.println(sensor.getAngle());
+  // Iterative function setting the outer loop target
+  motor.move();
+
+//  motor.monitor();
+  // User communication
+  command.run();
+
+  Serial.print("Target: ");
+  Serial.print(motor.target);
+  Serial.print(" | Angle: ");
+  Serial.print(sensor.getAngle());
+  Serial.print(" | Velocity: ");
+  Serial.println(motor.shaft_velocity);
+
+//  // Apply PWM to each phase one by one
+//  driver.setPwm(15, 0, 0);  // Apply PWM to Phase A only
+//  delay(1000);
+//  driver.setPwm(0, 15, 0);  // Apply PWM to Phase B only
+//  delay(1000);
+//  driver.setPwm(0, 0, 15);  // Apply PWM to Phase C only
+//  delay(1000);
+//  driver.setPwm(0, 0, 0);   // Turn off all phases
+//  delay(1000);
+
+}
