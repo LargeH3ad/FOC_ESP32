@@ -1,7 +1,7 @@
-// This code currently runs initial start-up sequence
-// and can spin given a hardcoded speed however
-// it currently fails to receive commands
-
+// This code currently runs:
+// - Velocity contorl (M#)
+// On hardware:
+// ESP32-wroom, DRV8302, AS5600
 #include <SimpleFOC.h>
 
 // DRV8302 pins connections
@@ -13,8 +13,8 @@
 //#define   INL_C 23
 
 #define   EN_GATE 27
-#define   M_PWM 26 
-#define   M_OC 3
+#define   M_PWM 26
+#define   M_OC 36
 #define   OC_ADJ 25
 
 // Motor instance
@@ -29,10 +29,20 @@ MagneticSensorI2C sensor = MagneticSensorI2C(0x36, 12, 0x0E, 4);
 // Commander interface
 // Commander interface
 Commander command = Commander(Serial);
-void onMotor(char* cmd) { command.motor(&motor, cmd); }
+void onMotor(char* cmd) { 
+  command.motor(&motor, cmd); 
+  
+  // Extract the numeric value from cmd
+  int voltage = atoi(cmd + 1); // Skip the first character (e.g., 'M')
+
+  Serial.print("The motor voltage chosen was: ");
+  Serial.println(voltage);
+  Serial.print("Target: ");
+  Serial.print(motor.target);
+}
 
 void setup() {
-  
+ 
   // DRV8302 specific code
   // M_OC - enable over-current protection
   pinMode(M_OC, OUTPUT);
@@ -55,7 +65,7 @@ void setup() {
   motor.linkDriver(&driver);
 
 //  driver.pwm_frequency = 25000;
-  
+ 
 //  // Choose FOC modulation
 //  motor.foc_modulation = FOCModulationType::SpaceVectorPWM;
 
@@ -63,7 +73,7 @@ void setup() {
   motor.PID_velocity.P = 0.025;
   motor.PID_velocity.I = 0.20;
   motor.PID_velocity.D = 0;
-  
+ 
   motor.PID_velocity.output_ramp = 1000;
   motor.LPF_velocity.Tf = 0.01;
 //  
@@ -72,14 +82,14 @@ void setup() {
 
   // Angle loop controller
 //  motor.P_angle.P = 20;
-  
+ 
   // Angle loop velocity limit
 //  motor.velocity_limit = 50;
 
   // Use monitoring with serial for motor init
   Serial.begin(115200);
   motor.useMonitoring(Serial);
-  
+ 
   motor.current_limit = 5; // Amps - default 0.2Amps
 
   // Initialize motor
@@ -88,18 +98,11 @@ void setup() {
   motor.initFOC();
 
   // Set the initial target value
-  motor.target = 10;
+  motor.target = 0;
 
   // Define the motor ID for commander
   command.add('M', onMotor, "motor");
-
-
-//  digitalWrite(EN_GATE, HIGH);
-
-//  digitalWrite(OC_ADJ, HIGH);
-
-//  driver.setPwm(10,10,10);
-  
+ 
   _delay(1000);
 }
 
@@ -123,14 +126,5 @@ void loop() {
   Serial.print(" | Velocity: ");
   Serial.println(motor.shaft_velocity);
 
-//  // Apply PWM to each phase one by one
-//  driver.setPwm(15, 0, 0);  // Apply PWM to Phase A only
-//  delay(1000);
-//  driver.setPwm(0, 15, 0);  // Apply PWM to Phase B only
-//  delay(1000);
-//  driver.setPwm(0, 0, 15);  // Apply PWM to Phase C only
-//  delay(1000);
-//  driver.setPwm(0, 0, 0);   // Turn off all phases
-//  delay(1000);
 
 }
