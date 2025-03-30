@@ -1,0 +1,86 @@
+// This code currently runs:
+// - Velocity control (M#)
+// On hardware:
+// ESP32-wroom, DRV8302, AS5600
+
+#include <SimpleFOC.h>
+
+// DRV8302 pins connections
+#define   INH_A 16
+#define   INH_B 17
+#define   INH_C 12
+#define   EN_GATE 27
+#define   M_PWM 26
+#define   M_OC 36
+#define   OC_ADJ 25
+
+// Motor instance
+BLDCMotor motor = BLDCMotor(7); // Assuming 7 pole pairs (adjust as needed)
+
+// Driver instance
+BLDCDriver3PWM driver = BLDCDriver3PWM(INH_A, INH_B, INH_C, EN_GATE);
+
+// AS5600 magnetic sensor instance (I2C)
+MagneticSensorI2C sensor = MagneticSensorI2C(0x36, 12, 0x0E, 4);
+
+// Commander interface
+Commander command = Commander(Serial);
+
+// Function to set motor voltage
+void onMotor(char* cmd) { 
+  command.motor(&motor, cmd); 
+  float voltage = atof(cmd + 1);  // Convert from string to float
+
+  Serial.print("The motor voltage chosen was: ");
+  Serial.println(voltage);
+  Serial.print("Target: ");
+  Serial.println(motor.target);
+}
+
+void setup() {
+  // DRV8302 specific code
+  pinMode(M_OC, OUTPUT);
+  digitalWrite(M_OC, LOW);
+  pinMode(M_PWM, OUTPUT);
+  digitalWrite(M_PWM, HIGH);
+  pinMode(OC_ADJ, OUTPUT);
+  digitalWrite(OC_ADJ, HIGH);
+
+  // Initialize the AS5600 sensor
+  sensor.init();
+  motor.linkSensor(&sensor);
+
+  // Configure driver
+  driver.voltage_power_supply = 24;
+  driver.init();
+  motor.linkDriver(&driver);
+
+  // Motor control parameters
+  motor.controller = MotionControlType::velocity;
+  motor.PID_velocity.P = 0.02;
+  motor.PID_velocity.I = 0.01; // Higher value gave more vibrations at higher speed
+  motor.PID_velocity.D = 0.001;
+  motor.PID_velocity.output_ramp = 1000;
+  motor.LPF_velocity.Tf = 0.05;
+  motor.voltage_limit = 20;
+  motor.current_limit = 5;
+
+  // Initialize motor
+  Serial.begin(115200);
+  motor.useMonitoring(Serial);
+  motor.init();
+  motor.initFOC();
+
+  // Set initial target
+  motor.target = 0;
+
+  // Add commands to Commander
+  command.add('M', onMotor, "motor");
+  _delay(1000);
+}
+
+void loop() {
+  motor.loopFOC();
+  motor.move();
+  command.run();
+}
