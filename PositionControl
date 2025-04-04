@@ -1,0 +1,89 @@
+#include <SimpleFOC.h>
+
+// DRV8302 pins connections
+#define INH_A 16
+#define INH_B 17
+#define INH_C 12
+#define EN_GATE 27
+#define M_PWM 26
+#define M_OC 36
+#define OC_ADJ 25
+
+// Motor instance
+BLDCMotor motor = BLDCMotor(7); // Adjust pole pairs if needed
+
+// Driver instance
+BLDCDriver3PWM driver = BLDCDriver3PWM(INH_A, INH_B, INH_C, EN_GATE);
+
+// AS5600 magnetic sensor instance (I2C)
+MagneticSensorI2C sensor = MagneticSensorI2C(0x36, 12, 0x0E, 4);
+
+// Commander interface
+Commander command = Commander(Serial);
+
+// Function to set motor target position
+void onMotor(char* cmd) {
+  command.motor(&motor, cmd);
+
+  float angleTarget = atof(cmd + 1);  // In radians
+  Serial.print("Target angle set (rad): ");
+  Serial.println(angleTarget);
+  Serial.print("Motor target: ");
+  Serial.println(motor.target);
+}
+
+void setup() {
+  // DRV8302 specific code
+  pinMode(M_OC, OUTPUT);
+  digitalWrite(M_OC, LOW);
+  pinMode(M_PWM, OUTPUT);
+  digitalWrite(M_PWM, HIGH);
+  pinMode(OC_ADJ, OUTPUT);
+  digitalWrite(OC_ADJ, HIGH);
+
+  // Initialize the AS5600 sensor
+  sensor.init();
+  motor.linkSensor(&sensor);
+
+  // Configure driver
+  driver.voltage_power_supply = 24;
+  driver.init();
+  motor.linkDriver(&driver);
+
+  // Motor control mode: Position (angle)
+   motor.controller = MotionControlType::angle;
+
+  // Position loop (outer loop) - calm and slow
+  motor.P_angle.P = 1.0;   // Lowered for gentle position control
+  motor.P_angle.I = 0.0;   // No integral for now (can add later)
+  motor.P_angle.D = 0.001; // Small damping to reduce oscillation
+
+  // Velocity loop (inner loop)
+  motor.PID_velocity.P = 0.02;
+  motor.PID_velocity.I = 0.01;
+  motor.PID_velocity.D = 0.0005;
+
+  // Filtering + limits
+  motor.LPF_velocity.Tf = 0.1;      // Filter out noise
+  motor.voltage_limit = 4;          // Lower power = gentler motion
+  motor.current_limit = 1.5;        // Safe current for testing
+
+  // Serial monitor and motor init
+  Serial.begin(115200);
+  motor.useMonitoring(Serial);
+  motor.init();
+  motor.initFOC();
+
+  // Initial angle target
+  motor.target = 0;
+
+  // Add command
+  command.add('M', onMotor, "motor angle target (rad)");
+  _delay(1000);
+}
+
+void loop() {
+  motor.loopFOC();
+  motor.move();
+  command.run();
+}
