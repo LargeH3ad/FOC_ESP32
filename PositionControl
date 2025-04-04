@@ -54,9 +54,9 @@ void setup() {
    motor.controller = MotionControlType::angle;
 
   // Position loop (outer loop) - calm and slow
-  motor.P_angle.P = 1.0;   // Lowered for gentle position control
-  motor.P_angle.I = 0.0;   // No integral for now (can add later)
-  motor.P_angle.D = 0.001; // Small damping to reduce oscillation
+  motor.P_angle.P = 15.0;   // Lowered for gentle position control
+  motor.P_angle.I = 0.000;   // No integral for now (can add later)
+  motor.P_angle.D = 0.025; // Small damping to reduce oscillation
 
   // Velocity loop (inner loop)
   motor.PID_velocity.P = 0.02;
