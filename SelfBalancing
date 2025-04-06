@@ -6,7 +6,6 @@
 // Designed to work with 1 motor setup.
 // Current issues:
 
-
 #include <SimpleFOC.h>
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
@@ -31,12 +30,13 @@ Adafruit_MPU6050 mpu;
 float pitch = 0;
 
 // ====== Control filters and PIDs ======
-PIDController pid_stb = PIDController(0.02, 0, 0.025, 200, 15);
+PIDController pid_stb = PIDController(0.05, 0, 0.03, 500, 20);
 PIDController pid_vel = PIDController(0.01, 0.02, 0, 10000, _PI / 10);  // Velocity PID
 
 LowPassFilter lpf_pitch_cmd = LowPassFilter(0.3);
 LowPassFilter lpf_throttle = LowPassFilter(0.5);
 LowPassFilter lpf_steering = LowPassFilter(0.1);
+LowPassFilter lpf_pitch = LowPassFilter(0.3); // Added LPF for pitch filtering
 
 // ====== Control Variables ======
 float throttle = 0;
@@ -115,9 +115,18 @@ void loop() {
     motor.target = 0;
   } else {
     pitch = getPitch();
+    pitch = lpf_pitch(pitch);  // Apply LPF to pitch value for smoother response
+    
     float vel_avg = motor.shaft_velocity;
     float target_pitch = lpf_pitch_cmd(pid_vel(vel_avg - lpf_throttle(throttle)));
-    float voltage = pid_stb(target_pitch - pitch);
+
+    // Apply deadband to avoid overreacting at small pitch angles
+    float pitch_error = target_pitch - pitch;
+    if (abs(pitch_error) < 0.3) {  // If pitch error is small, ignore it
+      pitch_error = 0;
+    }
+
+    float voltage = pid_stb(pitch_error);
     float steer_adj = lpf_steering(steering);
     motor.target = voltage + steer_adj;
   }
