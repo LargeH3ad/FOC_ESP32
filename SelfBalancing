@@ -1,0 +1,167 @@
+// Code to enable the robot to self balance on two wheels
+// Hardware: 
+// 2x DRV8302 
+// 2x 5010 (360kV) 7 pole pair BLDC motor
+// 2x AS5600
+// 1x MPU6050
+// 1x ESP32-wroom
+// 1x PCA9548A
+// 1x DC DC voltage step up (18V to 22V)
+// 1x DC DC voltage step down (18V to 5V)
+// 1x 2Ah dewalt 18V battery + adapter
+
+
+#include <SimpleFOC.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <Wire.h>
+
+// ====== Pin definitions ======
+#define INH_A 16
+#define INH_B 17
+#define INH_C 12
+#define EN_GATE 27
+#define M_PWM 26
+#define M_OC 36
+#define OC_ADJ 25
+
+#define PCA9548A_ADDR 0x70 // Default address when ADR0,1,2 are floating
+
+void selectI2CChannel(uint8_t channel) {
+  Wire.beginTransmission(PCA9548A_ADDR);
+  Wire.write(1 << channel); // Select channel 0–7
+  Wire.endTransmission();
+}
+
+// ====== Motor, Driver, Sensor ======
+BLDCMotor motor = BLDCMotor(7); // Adjust pole pairs if needed
+BLDCDriver3PWM driver = BLDCDriver3PWM(INH_A, INH_B, INH_C, EN_GATE);
+// MagneticSensorI2C sensor = MagneticSensorI2C(0x36, 12, 0x0E, 4);
+
+// ====== Encoders ======
+MagneticSensorI2C encoder1 = MagneticSensorI2C(0x36, 12, 0x0E, 4); // On I2C channel 2
+MagneticSensorI2C encoder2 = MagneticSensorI2C(0x36, 12, 0x0E, 4); // On I2C channel 3
+
+// ====== IMU ======
+Adafruit_MPU6050 mpu;
+float pitch = 0;
+
+// ====== Control filters and PIDs ======
+PIDController pid_stb = PIDController(0.05, 0, 0.03, 500, 20);
+PIDController pid_vel = PIDController(0.01, 0.02, 0, 10000, _PI / 10);  // Velocity PID
+
+LowPassFilter lpf_pitch_cmd = LowPassFilter(0.3);
+LowPassFilter lpf_throttle = LowPassFilter(0.5);
+LowPassFilter lpf_steering = LowPassFilter(0.1);
+LowPassFilter lpf_pitch = LowPassFilter(0.3); // Added LPF for pitch filtering
+
+// ====== Control Variables ======
+float throttle = 0;
+float steering = 0;
+float max_throttle = 10;
+float max_steering = 1;
+int state = 1; // 1 = balancing enabled
+
+// ====== Commander (Serial) ======
+Commander commander = Commander(Serial);
+void cntStab(char* cmd) { commander.pid(&pid_stb, cmd); }
+void cntMove(char* cmd) { commander.pid(&pid_vel, cmd); }
+void lpfPitch(char* cmd) { commander.lpf(&lpf_pitch_cmd, cmd); }
+void lpfSteering(char* cmd) { commander.lpf(&lpf_steering, cmd); }
+void lpfThrottle(char* cmd) { commander.lpf(&lpf_throttle, cmd); }
+
+// ====== IMU Setup ======
+bool initIMU() {
+  if (!mpu.begin()) {
+    Serial.println("MPU6050 not detected");
+    return false;
+  }
+  mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+  mpu.setFilterBandwidth(MPU6050_BAND_5_HZ);
+  return true;
+}
+
+float getPitch() {
+  sensors_event_t a, g, temp;
+  mpu.getEvent(&a, &g, &temp);
+  return atan2(a.acceleration.x, a.acceleration.z) * 180.0 / PI;
+}
+
+// void setOCThreshold(float fraction) {
+//   // Constrain to 0.0–1.0 range
+//   fraction = constrain(fraction, 0.0, 1.0);
+//   // Convert to 8-bit DAC value (0–255)
+//   int dacVal = fraction * 255;
+//   dacWrite(OC_ADJ, dacVal);
+// }
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
+
+  // DRV8302 setup (same as before)
+  pinMode(M_OC, OUTPUT); digitalWrite(M_OC, LOW);
+  pinMode(M_PWM, OUTPUT); digitalWrite(M_PWM, HIGH);
+
+  // IMU
+  if (!initIMU()) {
+    Serial.println("IMU init failed. Halting.");
+    while (1);
+  }
+
+  // ========== Init encoder1 ==========
+  selectI2CChannel(2);  // I2C channel 2
+  encoder1.init();
+  motor.linkSensor(&encoder1);
+
+  // Driver
+  driver.voltage_power_supply = 24;
+  driver.init();
+  motor.linkDriver(&driver);
+
+  motor.controller = MotionControlType::torque;
+  motor.useMonitoring(Serial);
+  motor.init();
+  motor.initFOC();
+
+  // Commander tuning interface
+  commander.add('A', cntStab, "PID stability");
+  commander.add('B', cntMove, "PID velocity");
+  commander.add('C', lpfThrottle, "LPF throttle");
+  commander.add('D', lpfPitch, "LPF pitch");
+  commander.add('E', lpfSteering, "LPF steering");
+
+  Serial.println("Self-balancing robot ready (dual encoder support)");
+}
+
+void loop() {
+  selectI2CChannel(2);  // Use encoder1 for motor
+  motor.loopFOC();
+
+  if (!state) {
+    motor.target = 0;
+  } else {
+    pitch = getPitch();
+    pitch = lpf_pitch(pitch);
+
+    float vel_avg = motor.shaft_velocity;
+    float target_pitch = lpf_pitch_cmd(pid_vel(vel_avg - lpf_throttle(throttle)));
+
+    float pitch_error = target_pitch - pitch;
+    if (abs(pitch_error) < 0.3) pitch_error = 0;
+
+    float voltage = pid_stb(pitch_error);
+    float steer_adj = lpf_steering(steering);
+    motor.target = -(voltage + steer_adj); // manually inverted motor direction for balancing
+  }
+
+  motor.move();
+  commander.run();
+
+  // Debug
+  Serial.print("Pitch: "); Serial.println(pitch);
+
+  selectI2CChannel(2); // Make sure we're still talking to encoder1
+  Serial.print(" | Angle: "); Serial.println(encoder1.getAngle());
+}
