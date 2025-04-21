@@ -10,6 +10,8 @@
 // 1x DC DC voltage step down (18V to 5V)
 // 1x 2Ah dewalt 18V battery + adapter
 
+// Current works with 1 motor and driver
+
 
 #include <SimpleFOC.h>
 #include <Adafruit_MPU6050.h>
@@ -20,6 +22,7 @@
 #define INH_A 16
 #define INH_B 17
 #define INH_C 12
+
 #define EN_GATE 27
 #define M_PWM 26
 #define M_OC 36
