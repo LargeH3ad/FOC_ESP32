@@ -18,15 +18,16 @@
 #include <Adafruit_Sensor.h>
 #include <Wire.h>
 
-// ====== Pin definitions ======
-#define INH_A 16
-#define INH_B 17
-#define INH_C 12
+// ====== Driver 1 Pin definitions ======
+#define INH_A1 16
+#define INH_B1 17
+#define INH_C1 12
 
-#define EN_GATE 27
-#define M_PWM 26
-#define M_OC 36
-#define OC_ADJ 25
+#define EN_GATE1 27
+#define M_PWM1 26
+#define M_OC1 36
+#define OC_ADJ1 25
+
 
 #define PCA9548A_ADDR 0x70 // Default address when ADR0,1,2 are floating
 
@@ -37,8 +38,8 @@ void selectI2CChannel(uint8_t channel) {
 }
 
 // ====== Motor, Driver, Sensor ======
-BLDCMotor motor = BLDCMotor(7); // Adjust pole pairs if needed
-BLDCDriver3PWM driver = BLDCDriver3PWM(INH_A, INH_B, INH_C, EN_GATE);
+BLDCMotor motor1 = BLDCMotor(7); // Adjust pole pairs if needed
+BLDCDriver3PWM driver1 = BLDCDriver3PWM(INH_A1, INH_B1, INH_C1, EN_GATE1);
 // MagneticSensorI2C sensor = MagneticSensorI2C(0x36, 12, 0x0E, 4);
 
 // ====== Encoders ======
@@ -96,7 +97,7 @@ float getPitch() {
 //   fraction = constrain(fraction, 0.0, 1.0);
 //   // Convert to 8-bit DAC value (0–255)
 //   int dacVal = fraction * 255;
-//   dacWrite(OC_ADJ, dacVal);
+//   dacWrite(OC_ADJ1, dacVal);
 // }
 
 void setup() {
@@ -104,8 +105,8 @@ void setup() {
   Wire.begin();
 
   // DRV8302 setup (same as before)
-  pinMode(M_OC, OUTPUT); digitalWrite(M_OC, LOW);
-  pinMode(M_PWM, OUTPUT); digitalWrite(M_PWM, HIGH);
+  pinMode(M_OC1, OUTPUT); digitalWrite(M_OC1, LOW);
+  pinMode(M_PWM1, OUTPUT); digitalWrite(M_PWM1, HIGH);
 
   // IMU
   if (!initIMU()) {
@@ -116,17 +117,17 @@ void setup() {
   // ========== Init encoder1 ==========
   selectI2CChannel(2);  // I2C channel 2
   encoder1.init();
-  motor.linkSensor(&encoder1);
+  motor1.linkSensor(&encoder1);
 
   // Driver
-  driver.voltage_power_supply = 24;
-  driver.init();
-  motor.linkDriver(&driver);
+  driver1.voltage_power_supply = 24;
+  driver1.init();
+  motor1.linkDriver(&driver1);
 
-  motor.controller = MotionControlType::torque;
-  motor.useMonitoring(Serial);
-  motor.init();
-  motor.initFOC();
+  motor1.controller = MotionControlType::torque;
+  motor1.useMonitoring(Serial);
+  motor1.init();
+  motor1.initFOC();
 
   // Commander tuning interface
   commander.add('A', cntStab, "PID stability");
@@ -140,15 +141,15 @@ void setup() {
 
 void loop() {
   selectI2CChannel(2);  // Use encoder1 for motor
-  motor.loopFOC();
+  motor1.loopFOC();
 
   if (!state) {
-    motor.target = 0;
+    motor1.target = 0;
   } else {
     pitch = getPitch();
     pitch = lpf_pitch(pitch);
 
-    float vel_avg = motor.shaft_velocity;
+    float vel_avg = motor1.shaft_velocity;
     float target_pitch = lpf_pitch_cmd(pid_vel(vel_avg - lpf_throttle(throttle)));
 
     float pitch_error = target_pitch - pitch;
@@ -156,10 +157,10 @@ void loop() {
 
     float voltage = pid_stb(pitch_error);
     float steer_adj = lpf_steering(steering);
-    motor.target = -(voltage + steer_adj); // manually inverted motor direction for balancing
+    motor1.target = -(voltage + steer_adj); // manually inverted motor direction for balancing
   }
 
-  motor.move();
+  motor1.move();
   commander.run();
 
   // Debug
