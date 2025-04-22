@@ -10,7 +10,7 @@
 // 1x DC DC voltage step down (18V to 5V)
 // 1x 2Ah dewalt 18V battery + adapter
 
-// Current works with 1 motor and driver
+// Current works with 2 motors and drivers but PID needs tuning
 
 
 #include <SimpleFOC.h>
@@ -28,6 +28,15 @@
 #define M_OC1 36
 #define OC_ADJ1 25
 
+// ====== Driver 2 Pin definitions ======
+#define INH_A2 32
+#define INH_B2 33
+#define INH_C2 19
+
+#define EN_GATE2 13
+#define M_PWM2 18
+#define M_OC2 34
+#define OC_ADJ2 23
 
 #define PCA9548A_ADDR 0x70 // Default address when ADR0,1,2 are floating
 
@@ -40,9 +49,12 @@ void selectI2CChannel(uint8_t channel) {
 // ====== Motor, Driver, Sensor ======
 BLDCMotor motor1 = BLDCMotor(7); // Adjust pole pairs if needed
 BLDCDriver3PWM driver1 = BLDCDriver3PWM(INH_A1, INH_B1, INH_C1, EN_GATE1);
-// MagneticSensorI2C sensor = MagneticSensorI2C(0x36, 12, 0x0E, 4);
+
+BLDCMotor motor2 = BLDCMotor(7); // Adjust pole pairs if needed
+BLDCDriver3PWM driver2 = BLDCDriver3PWM(INH_A2, INH_B2, INH_C2, EN_GATE2);
 
 // ====== Encoders ======
+// MagneticSensorI2C sensor = MagneticSensorI2C(0x36, 12, 0x0E, 4);
 MagneticSensorI2C encoder1 = MagneticSensorI2C(0x36, 12, 0x0E, 4); // On I2C channel 2
 MagneticSensorI2C encoder2 = MagneticSensorI2C(0x36, 12, 0x0E, 4); // On I2C channel 3
 
@@ -104,9 +116,16 @@ void setup() {
   Serial.begin(115200);
   Wire.begin();
 
-  // DRV8302 setup (same as before)
+  // DRV8302 Driver setup
   pinMode(M_OC1, OUTPUT); digitalWrite(M_OC1, LOW);
   pinMode(M_PWM1, OUTPUT); digitalWrite(M_PWM1, HIGH);
+
+  sleep(0.25);
+
+  pinMode(M_OC2, OUTPUT); digitalWrite(M_OC2, LOW);
+  pinMode(M_PWM2, OUTPUT); digitalWrite(M_PWM2, HIGH);
+
+  sleep(0.25);
 
   // IMU
   if (!initIMU()) {
@@ -115,9 +134,11 @@ void setup() {
   }
 
   // ========== Init encoder1 ==========
+  Serial.println("Initialising encoder 1");
   selectI2CChannel(2);  // I2C channel 2
   encoder1.init();
   motor1.linkSensor(&encoder1);
+  encoder1.init();
 
   // Driver
   driver1.voltage_power_supply = 24;
@@ -128,6 +149,27 @@ void setup() {
   motor1.useMonitoring(Serial);
   motor1.init();
   motor1.initFOC();
+
+  sleep(0.25);
+
+  // ========== Init encoder2 ==========
+  Serial.println("Initialising encoder 2");
+  selectI2CChannel(3);  // I2C channel 3
+  encoder2.init();
+  motor2.linkSensor(&encoder2);
+  encoder2.init();
+
+  // Driver
+  driver2.voltage_power_supply = 24;
+  driver2.init();
+  motor2.linkDriver(&driver2);
+
+  motor2.controller = MotionControlType::torque;
+  motor2.useMonitoring(Serial);
+  motor2.init();
+  motor2.initFOC();
+
+  sleep(0.25);
 
   // Commander tuning interface
   commander.add('A', cntStab, "PID stability");
@@ -140,11 +182,19 @@ void setup() {
 }
 
 void loop() {
-  selectI2CChannel(2);  // Use encoder1 for motor
+  // motor1 control
+  selectI2CChannel(2);
   motor1.loopFOC();
+  motor1.move();
+
+  // motor2 control
+  selectI2CChannel(3);
+  motor2.loopFOC();
+  motor2.move();
 
   if (!state) {
     motor1.target = 0;
+    motor2.target = 0;
   } else {
     pitch = getPitch();
     pitch = lpf_pitch(pitch);
@@ -158,14 +208,15 @@ void loop() {
     float voltage = pid_stb(pitch_error);
     float steer_adj = lpf_steering(steering);
     motor1.target = -(voltage + steer_adj); // manually inverted motor direction for balancing
+    motor2.target = -(voltage + steer_adj); // manually inverted motor direction for balancing
+
+    Serial.print("motor1.target: "); Serial.print(motor1.target); Serial.print("motor2.target: "); Serial.println(motor2.target); 
   }
 
-  motor1.move();
   commander.run();
 
-  // Debug
-  Serial.print("Pitch: "); Serial.println(pitch);
+  // Serial.print("Pitch: "); Serial.println(pitch);
 
-  selectI2CChannel(2); // Make sure we're still talking to encoder1
-  Serial.print(" | Angle: "); Serial.println(encoder1.getAngle());
+  // selectI2CChannel(2); // Make sure we're still talking to encoder1
+  // Serial.print(" | Angle1: "); Serial.print(encoder1.getAngle()); 
 }
