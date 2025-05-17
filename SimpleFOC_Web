@@ -89,15 +89,43 @@ float getPitch() {
 // ====== Web interface ======
 String htmlPage() {
   String html = "<!DOCTYPE html><html><body><h2>Self-Balancing Robot PID Control</h2>";
-  html += "<p>Pitch: " + String(pitch) + "°</p>";
-  html += "<form action='/update'>Kp: <input name='kp' value='" + String(pid_stb.P) + "'> ";
-  html += "Ki: <input name='ki' value='" + String(pid_stb.I) + "'> ";
-  html += "Kd: <input name='kd' value='" + String(pid_stb.D) + "'> ";
-  html += "<input type='submit' value='Update'></form>";
-  html += "<script>setInterval(()=>fetch('/pitch').then(r=>r.text()).then(t=>document.body.innerHTML=t),1000)</script>";
+
+  // Live pitch display
+  html += "<p>Pitch: <span id='pitch'>" + String(pitch, 2) + "</span>°</p>";
+
+  // PID form
+  html += "<form id='pidForm'>";
+  html += "Kp: <input id='kp' step='0.0001' value='" + String(pid_stb.P, 4) + "'> ";
+  html += "Ki: <input id='ki' step='0.0001' value='" + String(pid_stb.I, 4) + "'> ";
+  html += "Kd: <input id='kd' step='0.0001' value='" + String(pid_stb.D, 4) + "'> ";
+  html += "<button type='button' onclick='updatePID()'>Update</button></form>";
+
+  // JavaScript for pitch polling and PID updating
+  html += R"rawliteral(
+    <script>
+      // Update pitch every 100ms
+      setInterval(() => {
+        fetch('/pitch').then(r => r.text()).then(p => {
+          document.getElementById('pitch').textContent = p;
+        });
+      }, 100);
+
+      // Send PID values to server
+      function updatePID() {
+        const kp = document.getElementById('kp').value;
+        const ki = document.getElementById('ki').value;
+        const kd = document.getElementById('kd').value;
+        fetch(`/update?kp=${kp}&ki=${ki}&kd=${kd}`)
+          .then(r => r.text())
+          .then(t => console.log("PID updated")); // Optionally show confirmation
+      }
+    </script>
+  )rawliteral";
+
   html += "</body></html>";
   return html;
 }
+
 
 void handleRoot() {
   server.send(200, "text/html", htmlPage());
