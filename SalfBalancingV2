@@ -1,0 +1,239 @@
+#include <SimpleFOC.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <Wire.h>
+
+// Kalman filter parameters
+float Q_angle = 0.0005;  // Process noise variance
+float Q_bias = 0.001;    // Process noise variance for bias
+float R_measure = 0.1;   // Measurement noise variance
+float filteredAngle = 0; // Filtered angle
+float bias = 0;          // Gyro bias
+float P[2][2] = {{0, 0}, {0, 0}}; // Error covariance matrix
+float K[2];              // Kalman gain
+float y;                 // Angle error
+float S;                 // Estimate error
+float rate;              // Unbiased rate
+
+// ====== IMU ======
+Adafruit_MPU6050 mpu;
+
+// ====== Driver 1 Pin definitions ======
+#define INH_A1 16
+#define INH_B1 17
+#define INH_C1 12
+#define EN_GATE1 27
+#define M_PWM1 26
+#define M_OC1 36
+#define OC_ADJ1 25
+
+// ====== Driver 2 Pin definitions ======
+#define INH_A2 32
+#define INH_B2 33
+#define INH_C2 19
+#define EN_GATE2 13
+#define M_PWM2 18
+#define M_OC2 34
+#define OC_ADJ2 23
+
+#define PCA9548A_ADDR 0x70 // Default address when ADR0,1,2 are floating
+
+// ====== PID Controller for Balancing ======
+PIDController pid_balance = PIDController(0.45, 0.005, 0.0, 10000, 20); // P, I, D, ramp, limit
+const float TARGET_PITCH = -3.0; // Target balance point in degrees
+const float DEAD_ZONE = 0.3;     // Dead zone for pitch error (degrees)
+
+// ====== Motor, Driver, Sensor ======
+BLDCMotor motor1 = BLDCMotor(7, 0.1, 400);
+BLDCDriver3PWM driver1 = BLDCDriver3PWM(INH_A1, INH_B1, INH_C1, EN_GATE1);
+
+BLDCMotor motor2 = BLDCMotor(7, 0.1, 400);
+BLDCDriver3PWM driver2 = BLDCDriver3PWM(INH_A2, INH_B2, INH_C2, EN_GATE2);
+
+// ====== Encoders ======
+MagneticSensorI2C encoder1 = MagneticSensorI2C(0x36, 12, 0x0E, 4); // On I2C channel 2
+MagneticSensorI2C encoder2 = MagneticSensorI2C(0x36, 12, 0x0E, 4); // On I2C channel 3
+
+// ====== Commander ======
+Commander command = Commander(Serial);
+void doMotor(char* cmd) { 
+  command.motor(&motor1, cmd);
+  command.motor(&motor2, cmd);  
+}
+
+void selectI2CChannel(uint8_t channel) {
+  Wire.beginTransmission(PCA9548A_ADDR);
+  Wire.write(1 << channel); // Select channel 0–7
+  Wire.endTransmission();
+}
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
+
+  // Initialize MPU6050
+  if (!mpu.begin()) {
+    Serial.println("Failed to find MPU6050 chip");
+    while (1) {
+      delay(10);
+    }
+  }
+
+  // Configure MPU6050
+  mpu.setAccelerometerRange(MPU6050_RANGE_2_G);
+  mpu.setGyroRange(MPU6050_RANGE_250_DEG);
+  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+
+  // DRV8302 Driver setup
+  pinMode(M_OC1, OUTPUT); digitalWrite(M_OC1, LOW);
+  pinMode(M_PWM1, OUTPUT); digitalWrite(M_PWM1, HIGH);
+  delay(250);
+
+  pinMode(M_OC2, OUTPUT); digitalWrite(M_OC2, LOW);
+  pinMode(M_PWM2, OUTPUT); digitalWrite(M_PWM2, HIGH);
+  delay(250);
+
+  // ========== Init encoder1 ==========
+  Serial.println("Initialising encoder 1");
+  selectI2CChannel(2);  // I2C channel 2
+  encoder1.init();
+  motor1.linkSensor(&encoder1);
+  encoder1.init();
+
+  // Driver
+  driver1.voltage_power_supply = 24;
+  driver1.init();
+  motor1.linkDriver(&driver1);
+  motor1.voltage_sensor_align = 1;
+
+  motor1.torque_controller = TorqueControlType::voltage;
+  motor1.controller = MotionControlType::torque;
+  motor1.useMonitoring(Serial);
+  if (!motor1.init()) {
+    Serial.println("Motor1 init failed!");
+    return;
+  }
+  if (!motor1.initFOC()) {
+    Serial.println("FOC1 init failed!");
+    return;
+  }
+
+  motor1.target = 0; // Volts 
+  delay(250);
+
+  // ========== Init encoder2 ==========
+  Serial.println("Initialising encoder 2");
+  selectI2CChannel(3);  // I2C channel 3
+  encoder2.init();
+  motor2.linkSensor(&encoder2);
+  encoder2.init();
+
+  // Driver
+  driver2.voltage_power_supply = 24;
+  driver2.init();
+  motor2.linkDriver(&driver2);
+  motor2.voltage_sensor_align = 1;
+
+  motor2.torque_controller = TorqueControlType::voltage;
+  motor2.controller = MotionControlType::torque;
+  motor2.useMonitoring(Serial);
+  if (!motor2.init()) {
+    Serial.println("Motor2 init failed!");
+    return;
+  }
+  if (!motor2.initFOC()) {
+    Serial.println("FOC2 init failed!");
+    return;
+  }
+
+  motor2.target = 0; // Volts 
+  delay(250);
+
+  // add target command M
+  command.add('M', doMotor, "Motor");
+
+  Serial.println(F("Motor ready."));
+  Serial.println(F("Set the target using serial terminal and command M:"));
+  delay(500);
+
+  Serial.println("MPU6050 Found!");
+}
+
+float getPitch() {
+  // Get sensor data
+  sensors_event_t a, g, temp;
+  mpu.getEvent(&a, &g, &temp);
+  
+  // Calculate pitch from accelerometer
+  float pitch = atan2(-a.acceleration.x, sqrt(a.acceleration.y * a.acceleration.y + a.acceleration.z * a.acceleration.z)) * 180.0 / PI;
+  
+  // Get gyro rate
+  rate = g.gyro.y - bias;
+  
+  // Update Kalman filter
+  // Predict
+  filteredAngle += rate * 0.01; // Assuming 100Hz loop rate
+  P[0][0] += 0.01 * (P[1][1] - P[0][1] - P[1][0] + Q_angle);
+  P[0][1] -= 0.01 * Q_bias;
+  P[1][0] -= 0.01 * Q_bias;
+  P[1][1] += Q_bias * 0.01;
+  
+  // Update
+  y = pitch - filteredAngle;
+  S = P[0][0] + R_measure;
+  K[0] = P[0][0] / S;
+  K[1] = P[1][0] / S;
+  filteredAngle += K[0] * y;
+  bias += K[1] * y;
+  
+  // Update error covariance
+  float P00_temp = P[0][0];
+  float P01_temp = P[0][1];
+  P[0][0] -= K[0] * P00_temp;
+  P[0][1] -= K[0] * P01_temp;
+  P[1][0] -= K[1] * P00_temp;
+  P[1][1] -= K[1] * P01_temp;
+  
+  return filteredAngle;
+}
+
+void loop() {
+  // Motor control
+  selectI2CChannel(2);
+  motor1.loopFOC();
+  motor1.move();
+
+  selectI2CChannel(3);
+  motor2.loopFOC();
+  motor2.move();
+
+  // Allow manual motor control via commander
+  command.run();
+
+  // Get pitch and compute error
+  float pitch = getPitch();
+  float pitch_error = TARGET_PITCH - pitch;
+
+  // Apply dead zone to prevent small oscillations
+  if (abs(pitch_error) < DEAD_ZONE) {
+    pitch_error = 0;
+  }
+
+  // Compute control voltage using PID
+  float voltage = pid_balance(pitch_error);
+
+  // Apply voltage to both motors (negative to correct for motor direction)
+  motor1.target = -voltage; // Inverted for balancing
+  motor2.target = -voltage; // Inverted for balancing
+
+  // Debug output
+  Serial.print("Pitch: ");
+  Serial.print(pitch);
+  Serial.print(" deg, Error: ");
+  Serial.print(pitch_error);
+  Serial.print(" deg, Voltage: ");
+  Serial.print(voltage);
+  Serial.println(" V");
+
+//  delay(10); // 100Hz update rate
+}
