@@ -1,16 +1,29 @@
+// Added kalman filter to measure pitch on mpu6050
+
 #include <SimpleFOC.h>
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 #include <Wire.h>
 
+// Kalman filter parameters
+float Q_angle = 0.0005;  // Process noise variance
+float Q_bias = 0.001;   // Process noise variance for bias
+float R_measure = 0.1; // Measurement noise variance
+float filteredAngle = 0; // Filtered angle (renamed to avoid conflict with Adafruit_MPU6050::angle)
+float bias = 0;         // Gyro bias
+float P[2][2] = {{0, 0}, {0, 0}}; // Error covariance matrix
+float K[2];             // Kalman gain
+float y;                // Angle error
+float S;                // Estimate error
+float rate;             // Unbiased rate
+
 // ====== IMU ======
-  Adafruit_MPU6050 mpu;
+Adafruit_MPU6050 mpu;
 
 // ====== Driver 1 Pin definitions ======
 #define INH_A1 16
 #define INH_B1 17
 #define INH_C1 12
-
 #define EN_GATE1 27
 #define M_PWM1 26
 #define M_OC1 36
@@ -20,7 +33,6 @@
 #define INH_A2 32
 #define INH_B2 33
 #define INH_C2 19
-
 #define EN_GATE2 13
 #define M_PWM2 18
 #define M_OC2 34
@@ -42,7 +54,6 @@ BLDCMotor motor2 = BLDCMotor(7, 0.1, 400); // Adjust pole pairs if needed
 BLDCDriver3PWM driver2 = BLDCDriver3PWM(INH_A2, INH_B2, INH_C2, EN_GATE2);
 
 // ====== Encoders ======
-// MagneticSensorI2C sensor = MagneticSensorI2C(0x36, 12, 0x0E, 4);
 MagneticSensorI2C encoder1 = MagneticSensorI2C(0x36, 12, 0x0E, 4); // On I2C channel 2
 MagneticSensorI2C encoder2 = MagneticSensorI2C(0x36, 12, 0x0E, 4); // On I2C channel 3
 
@@ -51,68 +62,33 @@ Commander command = Commander(Serial);
 void doMotor(char* cmd) { 
   command.motor(&motor1, cmd);
   command.motor(&motor2, cmd);  
-  }
-/*
-
-
-// ====== Control filters and PIDs ======
-PIDController pid_stb = PIDController(0.05, 0, 0.03, 500, 20);
-PIDController pid_vel = PIDController(0.01, 0.02, 0, 10000, _PI / 10);  // Velocity PID
-
-LowPassFilter lpf_pitch_cmd = LowPassFilter(0.3);
-LowPassFilter lpf_throttle = LowPassFilter(0.5);
-LowPassFilter lpf_steering = LowPassFilter(0.1);
-LowPassFilter lpf_pitch = LowPassFilter(0.3); // Added LPF for pitch filtering
-
-// ====== Control Variables ======
-float throttle = 0;
-float steering = 0;
-float max_throttle = 10;
-float max_steering = 1;
-int state = 1; // 1 = balancing enabled
-*/
-
-
-  
-  
-//  // ====== IMU Setup ======
-//  bool initIMU() {
-//    if (!mpu.begin()) {
-//      Serial.println("MPU6050 not detected");
-//      return false;
-//    }
-//    mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
-//    mpu.setGyroRange(MPU6050_RANGE_500_DEG);
-//    mpu.setFilterBandwidth(MPU6050_BAND_5_HZ);
-//    return true;
-//  }
-//
-//float getPitch() {
-//    sensors_event_t a, g, temp;
-//    mpu.getEvent(&a, &g, &temp);
-//    return atan2(a.acceleration.x, a.acceleration.z) * 180.0 / PI;
-//  }
+}
 
 void setup() {
   Serial.begin(115200);
   Wire.begin();
 
+  // Initialize MPU6050
+  if (!mpu.begin()) {
+    Serial.println("Failed to find MPU6050 chip");
+    while (1) {
+      delay(10);
+    }
+  }
+
+  // Configure MPU6050
+  mpu.setAccelerometerRange(MPU6050_RANGE_2_G);
+  mpu.setGyroRange(MPU6050_RANGE_250_DEG);
+  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+
   // DRV8302 Driver setup
   pinMode(M_OC1, OUTPUT); digitalWrite(M_OC1, LOW);
   pinMode(M_PWM1, OUTPUT); digitalWrite(M_PWM1, HIGH);
-
-  sleep(0.25);
+  delay(250);
 
   pinMode(M_OC2, OUTPUT); digitalWrite(M_OC2, LOW);
   pinMode(M_PWM2, OUTPUT); digitalWrite(M_PWM2, HIGH);
-
-  sleep(0.25);
-
-  // IMU
-//  if (!initIMU()) {
-//    Serial.println("IMU init failed. Halting.");
-//    while (1);
-//  }
+  delay(250);
 
   // ========== Init encoder1 ==========
   Serial.println("Initialising encoder 1");
@@ -131,20 +107,19 @@ void setup() {
   motor1.controller = MotionControlType::torque;
   motor1.useMonitoring(Serial);
   // initialize motor
-  if(!motor1.init()){
+  if (!motor1.init()) {
     Serial.println("Motor1 init failed!");
     return;
   }
   // align sensor and start FOC
-  if(!motor1.initFOC()){
+  if (!motor1.initFOC()) {
     Serial.println("FOC1 init failed!");
     return;
   }
 
   // set the initial motor target
   motor1.target = 0; // Volts 
-
-  sleep(0.25);
+  delay(250);
 
   // ========== Init encoder2 ==========
   Serial.println("Initialising encoder 2");
@@ -163,66 +138,66 @@ void setup() {
   motor2.controller = MotionControlType::torque;
   motor2.useMonitoring(Serial);
   // initialize motor
-  if(!motor2.init()){
+  if (!motor2.init()) {
     Serial.println("Motor2 init failed!");
     return;
   }
   // align sensor and start FOC
-  if(!motor2.initFOC()){
+  if (!motor2.initFOC()) {
     Serial.println("FOC2 init failed!");
     return;
   }
 
   // set the initial motor target
   motor2.target = 0; // Volts 
-
-  sleep(0.25);
+  delay(250);
 
   // add target command M
   command.add('M', doMotor, "Motor");
 
   Serial.println(F("Motor ready."));
   Serial.println(F("Set the target using serial terminal and command M:"));
-    
-  sleep(0.5);
+  delay(500);
 
-  // Initialize MPU6050
-  if (!mpu.begin()) {
-    Serial.println("Failed to find MPU6050 chip");
-    while (1) delay(10);
-  }
   Serial.println("MPU6050 Found!");
-
-  // Set accelerometer range to ±2G
-  mpu.setAccelerometerRange(MPU6050_RANGE_2_G);
-  // Set gyro range to ±250 deg/s
-  mpu.setGyroRange(MPU6050_RANGE_250_DEG);
-  // Set filter bandwidth to 21 Hz
-  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
-
-  sleep(0.25);
-  // Commander tuning interface
-//  commander.add('A', cntStab, "PID stability");
-//  commander.add('B', cntMove, "PID velocity");
-//  commander.add('C', lpfThrottle, "LPF throttle");
-//  commander.add('D', lpfPitch, "LPF pitch");
-//  commander.add('E', lpfSteering, "LPF steering");
-
-//  Serial.println("Self-balancing robot ready (dual encoder support)");
 }
 
 float getPitch() {
+  // Get sensor data
   sensors_event_t a, g, temp;
   mpu.getEvent(&a, &g, &temp);
-
-  // Calculate pitch using accelerometer data
-  float pitch = atan2(-a.acceleration.x, sqrt(a.acceleration.y * a.acceleration.y + a.acceleration.z * a.acceleration.z));
   
-  // Convert radians to degrees
-  pitch = pitch * 180.0 / PI;
+  // Calculate pitch from accelerometer
+  float pitch = atan2(-a.acceleration.x, sqrt(a.acceleration.y * a.acceleration.y + a.acceleration.z * a.acceleration.z)) * 180.0 / PI;
   
-  // Round to 2 decimal places
-  return round(pitch * 100.0) / 100.0;
+  // Get gyro rate
+  rate = g.gyro.y - bias;
+  
+  // Update Kalman filter
+  // Predict
+  filteredAngle += rate * 0.01; // Assuming 100Hz loop rate
+  P[0][0] += 0.01 * (P[1][1] - P[0][1] - P[1][0] + Q_angle);
+  P[0][1] -= 0.01 * Q_bias;
+  P[1][0] -= 0.01 * Q_bias;
+  P[1][1] += Q_bias * 0.01;
+  
+  // Update
+  y = pitch - filteredAngle;
+  S = P[0][0] + R_measure;
+  K[0] = P[0][0] / S;
+  K[1] = P[1][0] / S;
+  filteredAngle += K[0] * y;
+  bias += K[1] * y;
+  
+  // Update error covariance
+  float P00_temp = P[0][0];
+  float P01_temp = P[0][1];
+  P[0][0] -= K[0] * P00_temp;
+  P[0][1] -= K[0] * P01_temp;
+  P[1][0] -= K[1] * P00_temp;
+  P[1][1] -= K[1] * P01_temp;
+  
+  return filteredAngle;
 }
 
 void loop() {
@@ -236,34 +211,12 @@ void loop() {
   motor2.loopFOC();
   motor2.move();
 
-//  if (!state) {
-//    motor1.target = 0;
-//    motor2.target = 0;
-//  } else {
-//    pitch = getPitch();
-//    pitch = lpf_pitch(pitch);
-//
-//    float vel_avg = motor1.shaft_velocity;
-//    float target_pitch = lpf_pitch_cmd(pid_vel(vel_avg - lpf_throttle(throttle)));
-//
-//    float pitch_error = target_pitch - pitch;
-//    if (abs(pitch_error) < 0.3) pitch_error = 0;
-//
-//    float voltage = pid_stb(pitch_error);
-//    float steer_adj = lpf_steering(steering);
-//    motor1.target = -(voltage + steer_adj); // manually inverted motor direction for balancing
-//    motor2.target = -(voltage + steer_adj); // manually inverted motor direction for balancing
-//
-//    Serial.print("motor1.target: "); Serial.print(motor1.target); Serial.print("motor2.target: "); Serial.println(motor2.target); 
-//  }
-
-//  Serial.print("motor1.target: "); Serial.print(motor1.target); Serial.print("motor2.target: "); Serial.println(motor2.target); 
-
   command.run();
 
   float pitch = getPitch();
-//  Serial.print("Pitch: "); Serial.println(getPitch());
+  Serial.print("Pitch: ");
+  Serial.print(pitch);
+  Serial.println(" deg");
 
-  // selectI2CChannel(2); // Make sure we're still talking to encoder1
-  // Serial.print(" | Angle1: "); Serial.print(encoder1.getAngle()); 
+//  delay(10); // 100Hz update rate
 }
