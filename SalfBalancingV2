@@ -39,9 +39,9 @@ Adafruit_MPU6050 mpu;
 #define PCA9548A_ADDR 0x70 // Default address when ADR0,1,2 are floating
 
 // ====== PID Controller for Balancing ======
-PIDController pid_balance = PIDController(0.45, 0.005, 0.0, 10000, 20); // P, I, D, ramp, limit
+PIDController pid_balance = PIDController(0.46, 0.006, 0.0, 10000, 20); // P, I, D, ramp, limit
 const float TARGET_PITCH = -3.0; // Target balance point in degrees
-const float DEAD_ZONE = 0.3;     // Dead zone for pitch error (degrees)
+const float DEAD_ZONE = 0.1;     // Dead zone for pitch error (degrees)
 
 // ====== Motor, Driver, Sensor ======
 BLDCMotor motor1 = BLDCMotor(7, 0.1, 400);
@@ -106,8 +106,8 @@ void setup() {
   motor1.linkDriver(&driver1);
   motor1.voltage_sensor_align = 1;
 
-  motor1.torque_controller = TorqueControlType::voltage;
-  motor1.controller = MotionControlType::torque;
+  motor1.torque_controller = TorqueControlType::voltage; // Torque is controlled through voltage variation
+  motor1.controller = MotionControlType::torque; // Control motion using torque
   motor1.useMonitoring(Serial);
   if (!motor1.init()) {
     Serial.println("Motor1 init failed!");
