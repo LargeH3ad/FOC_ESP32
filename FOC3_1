@@ -3,11 +3,17 @@
 #include <Adafruit_Sensor.h>
 #include <Wire.h>
 
+// Simple spike filter for IMU
+const float MAX_ANGLE_CHANGE = 10.0; // Maximum allowed angle change per loop (degrees)
+float lastValidPitch = 0;
+
+// ====== IMU ======
+Adafruit_MPU6050 mpu;
+
 // ====== Driver 1 Pin definitions ======
 #define INH_A1 16
 #define INH_B1 17
 #define INH_C1 12
-
 #define EN_GATE1 27
 #define M_PWM1 26
 #define M_OC1 36
@@ -17,220 +23,188 @@
 #define INH_A2 32
 #define INH_B2 33
 #define INH_C2 19
-
 #define EN_GATE2 13
 #define M_PWM2 18
 #define M_OC2 34
 #define OC_ADJ2 23
 
-#define PCA9548A_ADDR 0x70 // Default address when ADR0,1,2 are floating
+#define PCA9548A_ADDR 0x70
 
-void selectI2CChannel(uint8_t channel) {
-  Wire.beginTransmission(PCA9548A_ADDR);
-  Wire.write(1 << channel); // Select channel 0–7
-  Wire.endTransmission();
-}
+// ====== PID Controller for Balancing ======
+PIDController pid_balance = PIDController(0.3, 0.00, 0.00, 10000, 20);
+const float TARGET_PITCH = 0.0;
+const float DEAD_ZONE = 0.05;
 
 // ====== Motor, Driver, Sensor ======
-BLDCMotor motor1 = BLDCMotor(7); // Adjust pole pairs if needed
+BLDCMotor motor1 = BLDCMotor(7, 0.1, 400);
 BLDCDriver3PWM driver1 = BLDCDriver3PWM(INH_A1, INH_B1, INH_C1, EN_GATE1);
 
-BLDCMotor motor2 = BLDCMotor(7); // Adjust pole pairs if needed
+BLDCMotor motor2 = BLDCMotor(7, 0.1, 400);
 BLDCDriver3PWM driver2 = BLDCDriver3PWM(INH_A2, INH_B2, INH_C2, EN_GATE2);
 
 // ====== Encoders ======
-// MagneticSensorI2C sensor = MagneticSensorI2C(0x36, 12, 0x0E, 4);
-MagneticSensorI2C encoder1 = MagneticSensorI2C(0x36, 12, 0x0E, 4); // On I2C channel 2
-MagneticSensorI2C encoder2 = MagneticSensorI2C(0x36, 12, 0x0E, 4); // On I2C channel 3
+MagneticSensorI2C encoder1 = MagneticSensorI2C(0x36, 12, 0x0E, 4);
+MagneticSensorI2C encoder2 = MagneticSensorI2C(0x36, 12, 0x0E, 4);
 
 // ====== Commander ======
 Commander command = Commander(Serial);
 void doMotor(char* cmd) { 
   command.motor(&motor1, cmd);
   command.motor(&motor2, cmd);  
+}
+
+void selectI2CChannel(uint8_t channel) {
+  Wire.beginTransmission(PCA9548A_ADDR);
+  Wire.write(1 << channel);
+  if (Wire.endTransmission() != 0) {
+    Serial.println("Failed to select I2C channel!");
+    // Handle error (e.g., retry or halt)
   }
+}
 
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Starting initialization...");
+  
+  Wire.begin();
+  Wire.setClock(400000); // Increased I2C speed to 400kHz for better performance
 
-/*
-// ====== IMU ======
-Adafruit_MPU6050 mpu;
-float pitch = 0;
+  // Test I2C Mux
+  Wire.beginTransmission(PCA9548A_ADDR);
+  if (Wire.endTransmission() != 0) {
+    Serial.println("I2C Mux not found!");
+    while (1) delay(1000);
+  }
+  Serial.println("I2C Mux found!");
 
-// ====== Control filters and PIDs ======
-PIDController pid_stb = PIDController(0.05, 0, 0.03, 500, 20);
-PIDController pid_vel = PIDController(0.01, 0.02, 0, 10000, _PI / 10);  // Velocity PID
-
-LowPassFilter lpf_pitch_cmd = LowPassFilter(0.3);
-LowPassFilter lpf_throttle = LowPassFilter(0.5);
-LowPassFilter lpf_steering = LowPassFilter(0.1);
-LowPassFilter lpf_pitch = LowPassFilter(0.3); // Added LPF for pitch filtering
-
-// ====== Control Variables ======
-float throttle = 0;
-float steering = 0;
-float max_throttle = 10;
-float max_steering = 1;
-int state = 1; // 1 = balancing enabled
-
-// ====== IMU Setup ======
-bool initIMU() {
+  // Initialize MPU6050
   if (!mpu.begin()) {
-    Serial.println("MPU6050 not detected");
-    return false;
+    Serial.println("Failed to find MPU6050 chip");
+    while (1) delay(10);
   }
-  mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
-  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
-  mpu.setFilterBandwidth(MPU6050_BAND_5_HZ);
-  return true;
+  
+  // Configure MPU6050 for faster response
+  mpu.setAccelerometerRange(MPU6050_RANGE_4_G); // Slightly higher range for better resolution
+  mpu.setGyroRange(MPU6050_RANGE_500_DEG); // Higher range for faster movements
+  mpu.setFilterBandwidth(MPU6050_BAND_94_HZ); // Higher bandwidth for faster response
+
+  // DRV8302 setup
+  pinMode(M_OC1, OUTPUT); digitalWrite(M_OC1, LOW);
+  pinMode(M_PWM1, OUTPUT); digitalWrite(M_PWM1, HIGH);
+  pinMode(M_OC2, OUTPUT); digitalWrite(M_OC2, LOW);
+  pinMode(M_PWM2, OUTPUT); digitalWrite(M_PWM2, HIGH);
+  delay(200); // Reduced delay
+
+  // ========== Init Motor 1 ==========
+  Serial.println("Initializing Motor 1...");
+  selectI2CChannel(2);
+  
+  encoder1.init();
+  motor1.linkSensor(&encoder1);
+
+  driver1.voltage_power_supply = 24;
+  driver1.init();
+  motor1.linkDriver(&driver1);
+  motor1.voltage_sensor_align = 1;
+  motor1.torque_controller = TorqueControlType::voltage;
+  motor1.controller = MotionControlType::torque;
+  motor1.voltage_limit = 20;
+  
+  motor1.init();
+  motor1.initFOC();
+  motor1.target = 0;
+
+  // ========== Init Motor 2 ==========
+  Serial.println("Initializing Motor 2...");
+  selectI2CChannel(3);
+  
+  encoder2.init();
+  motor2.linkSensor(&encoder2);
+
+  driver2.voltage_power_supply = 24;
+  driver2.init();
+  motor2.linkDriver(&driver2);
+  motor2.voltage_sensor_align = 1;
+  motor2.torque_controller = TorqueControlType::voltage;
+  motor2.controller = MotionControlType::torque;
+  motor2.voltage_limit = 20;
+  
+  motor2.init();
+  motor2.initFOC();
+  motor2.target = 0;
+
+  command.add('M', doMotor, "Motor");
+  Serial.println("Motors ready!");
+  
+  // Initialize lastValidPitch
+  sensors_event_t a, g, temp;
+  mpu.getEvent(&a, &g, &temp);
+  lastValidPitch = atan2(-a.acceleration.x, sqrt(a.acceleration.y * a.acceleration.y + a.acceleration.z * a.acceleration.z)) * 180.0 / PI;
 }
 
 float getPitch() {
   sensors_event_t a, g, temp;
   mpu.getEvent(&a, &g, &temp);
-  return atan2(a.acceleration.x, a.acceleration.z) * 180.0 / PI;
-}
-*/
-
-void setup() {
-  Serial.begin(115200);
-  Wire.begin();
-
-  // DRV8302 Driver setup
-  pinMode(M_OC1, OUTPUT); digitalWrite(M_OC1, LOW);
-  pinMode(M_PWM1, OUTPUT); digitalWrite(M_PWM1, HIGH);
-
-  sleep(0.25);
-
-  pinMode(M_OC2, OUTPUT); digitalWrite(M_OC2, LOW);
-  pinMode(M_PWM2, OUTPUT); digitalWrite(M_PWM2, HIGH);
-
-  sleep(0.25);
-
-  // IMU
-//  if (!initIMU()) {
-//    Serial.println("IMU init failed. Halting.");
-//    while (1);
-//  }
-
-  // ========== Init encoder1 ==========
-  Serial.println("Initialising encoder 1");
-  selectI2CChannel(2);  // I2C channel 2
-  encoder1.init();
-  motor1.linkSensor(&encoder1);
-  encoder1.init();
-
-  // Driver
-  driver1.voltage_power_supply = 24;
-  driver1.init();
-  motor1.linkDriver(&driver1);
-  motor1.voltage_sensor_align = 0.1;
-
-  motor1.torque_controller = TorqueControlType::voltage;
-  motor1.controller = MotionControlType::torque;
-  motor1.useMonitoring(Serial);
-  // initialize motor
-  if(!motor1.init()){
-    Serial.println("Motor1 init failed!");
-    return;
-  }
-  // align sensor and start FOC
-  if(!motor1.initFOC()){
-    Serial.println("FOC1 init failed!");
-    return;
-  }
-
-  // set the initial motor target
-  motor1.target = 0; // Volts 
-
-  sleep(0.25);
-
-  // ========== Init encoder2 ==========
-  Serial.println("Initialising encoder 2");
-  selectI2CChannel(3);  // I2C channel 3
-  encoder2.init();
-  motor2.linkSensor(&encoder2);
-  encoder2.init();
-
-  // Driver
-  driver2.voltage_power_supply = 24;
-  driver2.init();
-  motor2.linkDriver(&driver2);
-  motor2.voltage_sensor_align = 0.1;
-
-  motor2.torque_controller = TorqueControlType::voltage;
-  motor2.controller = MotionControlType::torque;
-  motor2.useMonitoring(Serial);
-  // initialize motor
-  if(!motor2.init()){
-    Serial.println("Motor2 init failed!");
-    return;
-  }
-  // align sensor and start FOC
-  if(!motor2.initFOC()){
-    Serial.println("FOC2 init failed!");
-    return;
-  }
-
-  // set the initial motor target
-  motor2.target = 0; // Volts 
-
-  sleep(0.25);
-
-  // add target command M
-  command.add('M', doMotor, "Motor");
-
-  Serial.println(F("Motor ready."));
-  Serial.println(F("Set the target using serial terminal and command M:"));
-  _delay(5000);
-
-  // Commander tuning interface
-//  commander.add('A', cntStab, "PID stability");
-//  commander.add('B', cntMove, "PID velocity");
-//  commander.add('C', lpfThrottle, "LPF throttle");
-//  commander.add('D', lpfPitch, "LPF pitch");
-//  commander.add('E', lpfSteering, "LPF steering");
-
-//  Serial.println("Self-balancing robot ready (dual encoder support)");
+  
+  // Accelerometer-based pitch
+  float accelPitch = atan2(-a.acceleration.x, sqrt(a.acceleration.y * a.acceleration.y + a.acceleration.z * a.acceleration.z)) * 180.0 / PI;
+  
+  // Gyro integration (basic complementary filter)
+  static float pitch = 0;
+  static unsigned long lastTime = micros();
+  unsigned long now = micros();
+  float dt = (now - lastTime) / 1000000.0;
+  lastTime = now;
+  
+  float gyroPitch = g.gyro.y * dt; // Integrate gyro rate
+  pitch = 0.98 * (pitch + gyroPitch) + 0.02 * accelPitch; // Complementary filter
+  
+  return pitch;
 }
 
 void loop() {
-  // motor1 control
+  // Get pitch (now much faster without Kalman filter)
+  float pitch = getPitch();
+  float pitch_error = TARGET_PITCH - pitch;
+
+  // Apply dead zone
+  if (abs(pitch_error) < DEAD_ZONE) {
+    pitch_error = 0;
+  }
+
+  // Compute control voltage
+  float voltage = pid_balance(pitch_error);
+
+  // Apply voltage to motors
+  motor1.target = -voltage;
+  motor2.target = voltage;
+
+  // Motor control (moved to end for better timing)
   selectI2CChannel(2);
   motor1.loopFOC();
   motor1.move();
 
-  // motor2 control
   selectI2CChannel(3);
   motor2.loopFOC();
   motor2.move();
 
-//  if (!state) {
-//    motor1.target = 0;
-//    motor2.target = 0;
-//  } else {
-//    pitch = getPitch();
-//    pitch = lpf_pitch(pitch);
-//
-//    float vel_avg = motor1.shaft_velocity;
-//    float target_pitch = lpf_pitch_cmd(pid_vel(vel_avg - lpf_throttle(throttle)));
-//
-//    float pitch_error = target_pitch - pitch;
-//    if (abs(pitch_error) < 0.3) pitch_error = 0;
-//
-//    float voltage = pid_stb(pitch_error);
-//    float steer_adj = lpf_steering(steering);
-//    motor1.target = -(voltage + steer_adj); // manually inverted motor direction for balancing
-//    motor2.target = -(voltage + steer_adj); // manually inverted motor direction for balancing
-//
-//    Serial.print("motor1.target: "); Serial.print(motor1.target); Serial.print("motor2.target: "); Serial.println(motor2.target); 
-//  }
+  // Reduced frequency command checking
+  static unsigned long lastCommand = 0;
+  if (millis() - lastCommand > 100) {
+    command.run();
+    lastCommand = millis();
+  }
 
-  Serial.print("motor1.target: "); Serial.print(motor1.target); Serial.print("motor2.target: "); Serial.println(motor2.target); 
+  // Less frequent debug output
+  static unsigned long lastPrint = 0;
+  if (millis() - lastPrint > 500) {
+    Serial.print("Pitch: ");
+    Serial.print(pitch, 1);
+    Serial.print("°, Voltage: ");
+    Serial.print(voltage, 2);
+    Serial.println("V");
+    lastPrint = millis();
+  }
 
-  command.run();
-
-  // Serial.print("Pitch: "); Serial.println(pitch);
-
-  // selectI2CChannel(2); // Make sure we're still talking to encoder1
-  // Serial.print(" | Angle1: "); Serial.print(encoder1.getAngle()); 
+  // No artificial delay - run as fast as possible for maximum responsiveness
 }
