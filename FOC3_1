@@ -31,7 +31,7 @@ Adafruit_MPU6050 mpu;
 #define PCA9548A_ADDR 0x70
 
 // ====== PID Controller for Balancing ======
-PIDController pid_balance = PIDController(0.3, 0.00, 0.00, 10000, 20);
+PIDController pid_balance = PIDController(0.35, 0.00, 0.003, 10000, 20);
 const float TARGET_PITCH = 0.0;
 const float DEAD_ZONE = 0.05;
 
@@ -63,6 +63,12 @@ void selectI2CChannel(uint8_t channel) {
 }
 
 void setup() {
+  pinMode(OC_ADJ1, OUTPUT);  // For Motor 1
+  digitalWrite(OC_ADJ1, HIGH);  // Set to DVDD for max threshold (~0.2V V_DS)
+  
+  pinMode(OC_ADJ2, OUTPUT);  // For Motor 2
+  digitalWrite(OC_ADJ2, HIGH);
+
   Serial.begin(115200);
   Serial.println("Starting initialization...");
   
@@ -108,7 +114,7 @@ void setup() {
   motor1.voltage_sensor_align = 1;
   motor1.torque_controller = TorqueControlType::voltage;
   motor1.controller = MotionControlType::torque;
-  motor1.voltage_limit = 20;
+  motor1.voltage_limit = 18;
   
   motor1.init();
   motor1.initFOC();
@@ -127,7 +133,7 @@ void setup() {
   motor2.voltage_sensor_align = 1;
   motor2.torque_controller = TorqueControlType::voltage;
   motor2.controller = MotionControlType::torque;
-  motor2.voltage_limit = 20;
+  motor2.voltage_limit = 18;
   
   motor2.init();
   motor2.initFOC();
