@@ -3,9 +3,74 @@
 #include <Adafruit_Sensor.h>
 #include <Wire.h>
 
-// Simple spike filter for IMU
-const float MAX_ANGLE_CHANGE = 10.0; // Maximum allowed angle change per loop (degrees)
-float lastValidPitch = 0;
+// ====== Simple Kalman Filter for IMU ======
+struct SimpleKalman {
+  float Q_angle;    // Process noise variance for angle
+  float Q_bias;     // Process noise variance for bias
+  float R_measure;  // Measurement noise variance
+  
+  float angle;      // The angle calculated by the Kalman filter
+  float bias;       // The gyro bias calculated by the Kalman filter
+  float rate;       // Unbiased rate calculated from the rate and the calculated bias
+  
+  float P[2][2];    // Error covariance matrix
+  
+  SimpleKalman() {
+    // Tuned for fast response with noise rejection
+    Q_angle = 0.001f;   // Process noise - smaller = trust model more
+    Q_bias = 0.003f;    // Bias process noise
+    R_measure = 0.03f;  // Measurement noise - smaller = trust measurements more
+    
+    angle = 0.0f;
+    bias = 0.0f;
+    
+    // Initialize covariance matrix
+    P[0][0] = 0.0f;
+    P[0][1] = 0.0f;
+    P[1][0] = 0.0f;
+    P[1][1] = 0.0f;
+  }
+  
+  float getAngle(float newAngle, float newRate, float dt) {
+    // Prediction step
+    rate = newRate - bias;
+    angle += dt * rate;
+    
+    // Update error covariance matrix
+    P[0][0] += dt * (dt * P[1][1] - P[0][1] - P[1][0] + Q_angle);
+    P[0][1] -= dt * P[1][1];
+    P[1][0] -= dt * P[1][1];
+    P[1][1] += Q_bias * dt;
+    
+    // Innovation
+    float y = newAngle - angle;
+    
+    // Innovation covariance
+    float S = P[0][0] + R_measure;
+    
+    // Kalman gain
+    float K[2];
+    K[0] = P[0][0] / S;
+    K[1] = P[1][0] / S;
+    
+    // Update angle and bias
+    angle += K[0] * y;
+    bias += K[1] * y;
+    
+    // Update error covariance matrix
+    float P00_temp = P[0][0];
+    float P01_temp = P[0][1];
+    
+    P[0][0] -= K[0] * P00_temp;
+    P[0][1] -= K[0] * P01_temp;
+    P[1][0] -= K[1] * P00_temp;
+    P[1][1] -= K[1] * P01_temp;
+    
+    return angle;
+  }
+};
+
+SimpleKalman kalmanFilter;
 
 // ====== IMU ======
 Adafruit_MPU6050 mpu;
@@ -31,7 +96,8 @@ Adafruit_MPU6050 mpu;
 #define PCA9548A_ADDR 0x70
 
 // ====== PID Controller for Balancing ======
-PIDController pid_balance = PIDController(0.35, 0.00, 0.003, 10000, 20);
+// Reduced D term since Kalman filter handles noise
+PIDController pid_balance = PIDController(0.26, 0.01, 0.0, 10000, 20);
 const float TARGET_PITCH = 0.0;
 const float DEAD_ZONE = 0.05;
 
@@ -48,9 +114,9 @@ MagneticSensorI2C encoder2 = MagneticSensorI2C(0x36, 12, 0x0E, 4);
 
 // ====== Commander ======
 Commander command = Commander(Serial);
-void doMotor(char* cmd) { 
+void doMotor(char* cmd) {
   command.motor(&motor1, cmd);
-  command.motor(&motor2, cmd);  
+  command.motor(&motor2, cmd);
 }
 
 void selectI2CChannel(uint8_t channel) {
@@ -65,13 +131,13 @@ void selectI2CChannel(uint8_t channel) {
 void setup() {
   pinMode(OC_ADJ1, OUTPUT);  // For Motor 1
   digitalWrite(OC_ADJ1, HIGH);  // Set to DVDD for max threshold (~0.2V V_DS)
-  
+
   pinMode(OC_ADJ2, OUTPUT);  // For Motor 2
   digitalWrite(OC_ADJ2, HIGH);
 
   Serial.begin(115200);
   Serial.println("Starting initialization...");
-  
+
   Wire.begin();
   Wire.setClock(400000); // Increased I2C speed to 400kHz for better performance
 
@@ -88,23 +154,23 @@ void setup() {
     Serial.println("Failed to find MPU6050 chip");
     while (1) delay(10);
   }
-  
+
   // Configure MPU6050 for faster response
-  mpu.setAccelerometerRange(MPU6050_RANGE_4_G); // Slightly higher range for better resolution
-  mpu.setGyroRange(MPU6050_RANGE_500_DEG); // Higher range for faster movements
-  mpu.setFilterBandwidth(MPU6050_BAND_94_HZ); // Higher bandwidth for faster response
+  mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
+  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+  mpu.setFilterBandwidth(MPU6050_BAND_94_HZ);
 
   // DRV8302 setup
   pinMode(M_OC1, OUTPUT); digitalWrite(M_OC1, LOW);
   pinMode(M_PWM1, OUTPUT); digitalWrite(M_PWM1, HIGH);
   pinMode(M_OC2, OUTPUT); digitalWrite(M_OC2, LOW);
   pinMode(M_PWM2, OUTPUT); digitalWrite(M_PWM2, HIGH);
-  delay(200); // Reduced delay
+  delay(200);
 
   // ========== Init Motor 1 ==========
   Serial.println("Initializing Motor 1...");
   selectI2CChannel(2);
-  
+
   encoder1.init();
   motor1.linkSensor(&encoder1);
 
@@ -115,7 +181,7 @@ void setup() {
   motor1.torque_controller = TorqueControlType::voltage;
   motor1.controller = MotionControlType::torque;
   motor1.voltage_limit = 18;
-  
+
   motor1.init();
   motor1.initFOC();
   motor1.target = 0;
@@ -123,7 +189,7 @@ void setup() {
   // ========== Init Motor 2 ==========
   Serial.println("Initializing Motor 2...");
   selectI2CChannel(3);
-  
+
   encoder2.init();
   motor2.linkSensor(&encoder2);
 
@@ -134,43 +200,46 @@ void setup() {
   motor2.torque_controller = TorqueControlType::voltage;
   motor2.controller = MotionControlType::torque;
   motor2.voltage_limit = 18;
-  
+
   motor2.init();
   motor2.initFOC();
   motor2.target = 0;
 
   command.add('M', doMotor, "Motor");
   Serial.println("Motors ready!");
-  
-  // Initialize lastValidPitch
+
+  // Initialize Kalman filter with first measurement
   sensors_event_t a, g, temp;
   mpu.getEvent(&a, &g, &temp);
-  lastValidPitch = atan2(-a.acceleration.x, sqrt(a.acceleration.y * a.acceleration.y + a.acceleration.z * a.acceleration.z)) * 180.0 / PI;
+  float initialPitch = atan2(-a.acceleration.x, sqrt(a.acceleration.y * a.acceleration.y + a.acceleration.z * a.acceleration.z)) * 180.0 / PI;
+  kalmanFilter.angle = initialPitch;
 }
 
-float getPitch() {
+float getPitchKalman() {
   sensors_event_t a, g, temp;
   mpu.getEvent(&a, &g, &temp);
-  
-  // Accelerometer-based pitch
+
+  // Calculate accelerometer-based pitch
   float accelPitch = atan2(-a.acceleration.x, sqrt(a.acceleration.y * a.acceleration.y + a.acceleration.z * a.acceleration.z)) * 180.0 / PI;
   
-  // Gyro integration (basic complementary filter)
-  static float pitch = 0;
+  // Get gyro rate (y-axis for pitch)
+  float gyroRate = g.gyro.y * 180.0 / PI; // Convert to degrees/sec
+  
+  // Calculate time step
   static unsigned long lastTime = micros();
   unsigned long now = micros();
-  float dt = (now - lastTime) / 1000000.0;
+  float dt = (now - lastTime) / 1000000.0f; // Convert to seconds
   lastTime = now;
   
-  float gyroPitch = g.gyro.y * dt; // Integrate gyro rate
-  pitch = 0.98 * (pitch + gyroPitch) + 0.02 * accelPitch; // Complementary filter
+  // Apply Kalman filter
+  float filteredPitch = kalmanFilter.getAngle(accelPitch, gyroRate, dt);
   
-  return pitch;
+  return filteredPitch;
 }
 
 void loop() {
-  // Get pitch (now much faster without Kalman filter)
-  float pitch = getPitch();
+  // Get filtered pitch using Kalman filter
+  float pitch = getPitchKalman();
   float pitch_error = TARGET_PITCH - pitch;
 
   // Apply dead zone
@@ -185,7 +254,7 @@ void loop() {
   motor1.target = -voltage;
   motor2.target = voltage;
 
-  // Motor control (moved to end for better timing)
+  // Motor control
   selectI2CChannel(2);
   motor1.loopFOC();
   motor1.move();
