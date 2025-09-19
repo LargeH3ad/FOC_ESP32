@@ -97,8 +97,8 @@ Adafruit_MPU6050 mpu;
 
 // ====== PID Controller for Balancing ======
 // Reduced D term since Kalman filter handles noise
-PIDController pid_balance = PIDController(0.26, 0.01, 0.0, 10000, 20);
-const float TARGET_PITCH = 0.0;
+PIDController pid_balance = PIDController(0.32 , 0.01, 0.005, 10000, 20);
+const float TARGET_PITCH = -1.50;
 const float DEAD_ZONE = 0.05;
 
 // ====== Motor, Driver, Sensor ======
